@@ -22,6 +22,8 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     # Gateway-only assistant/status chatter; mobile platforms opt down to final-answer-first.
     "interim_assistant_messages": True,
     "long_running_notifications": True,
+    # One edit-in-place "🔀 Subagents · N/M done" bubble per delegating turn (Telegram); structure only.
+    "delegation_status": True,
     "busy_ack_detail": True,
     "busy_steer_ack_enabled": True,  # busy_input_mode=steer echo; the text still lands in the run
     # Delete tool-progress / "⏳ Working" bubbles after a SUCCESSFUL final response where deletion is
@@ -175,6 +177,7 @@ _NORMALISERS: dict[str, Any] = {
     "streaming": _norm_bool,
     "interim_assistant_messages": _norm_bool,
     "long_running_notifications": _norm_long_running,
+    "delegation_status": _norm_bool,
     "busy_ack_detail": _norm_bool,
     "busy_steer_ack_enabled": _norm_bool,
     "thinking_progress": _norm_bool,
