@@ -168,6 +168,20 @@ class TurnRunner:
         if msg is not None:
             self._progress_emit(msg)
 
+    async def _run_delegated_child_status(self, board: DelegatedChildStatus) -> None:
+        """Own a board publisher on the gateway loop, unless shutdown has begun."""
+        runner = self._runner
+        shutdown_event = getattr(runner, "_shutdown_event", None)
+        if getattr(runner, "_running", True) is False or (
+            shutdown_event is not None and shutdown_event.is_set()
+        ):
+            board.publisher_not_started()
+            return
+        retain = getattr(runner, "_retain_background_task", None)
+        if callable(retain):
+            retain(asyncio.current_task())
+        await board.run()
+
     def _progress_delegated_child_status(self, event_type, kwargs: dict) -> None:
         """Render direct ``subagent.*`` events into this turn's status bubble (Telegram only).
 
@@ -184,8 +198,18 @@ class TurnRunner:
         if getattr(platform, "value", platform) != Platform.TELEGRAM.value:
             return
         adapter = ctx._status_adapter
-        if adapter is None or not callable(getattr(adapter, "edit_message", None)):
+        adapter_edit = getattr(type(adapter), "edit_message", None) if adapter is not None else None
+        if adapter_edit is None or adapter_edit is BasePlatformAdapter.edit_message:
             return
+        # RelayAdapter implements edit_message generically; the destination descriptor
+        # remains authoritative about whether this chat can actually edit.
+        descriptor_for_chat = getattr(adapter, "_descriptor_for_chat", None)
+        if callable(descriptor_for_chat):
+            try:
+                if not descriptor_for_chat(str(ctx._status_chat_id)).supports_edit:
+                    return
+            except Exception:
+                return
         try:
             board = ctx._delegated_child_status
             if board is None:
@@ -196,7 +220,11 @@ class TurnRunner:
                             adapter, ctx._status_chat_id, ctx._status_thread_metadata,
                         )
             if board.observe(event_type, kwargs):
-                if self._schedule(board.run(), "delegated child status scheduling error") is None:
+                future = self._schedule(
+                    self._run_delegated_child_status(board),
+                    "delegated child status scheduling error",
+                )
+                if future is None:
                     board.publisher_not_started()
         except Exception:
             logger.debug("delegated child status failed", exc_info=True)

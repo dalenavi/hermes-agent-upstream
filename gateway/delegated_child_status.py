@@ -15,7 +15,8 @@ only. Rules that keep it safe for children that outlive their turn:
   tool argument, model name or error text: a detached child keeps reporting
   after the foreground turn has moved on, so nothing it says is trusted.
 * Owned by exactly one ``TurnContext`` and bound to that turn's adapter, chat
-  and thread at creation, so a late event can only ever edit its own bubble.
+  and thread metadata. The adapter's normal routing fallbacks still apply to the
+  initial send; after an id returns, updates edit that owned message only.
 * Direct children only (``depth == 0``); a nested orchestrator's grandchildren
   are its business.
 * One publisher task per board, paced by ``_MIN_EDIT_INTERVAL``: a burst of
@@ -82,7 +83,12 @@ class DelegatedChildStatus:
         self, adapter: Any, chat_id: str, metadata: Optional[dict], *,
         min_edit_interval: float = _MIN_EDIT_INTERVAL, clock=time.monotonic, sleep=asyncio.sleep,
     ) -> None:
-        self._adapter, self._chat_id, self._metadata = adapter, str(chat_id), metadata
+        self._adapter = adapter
+        self._chat_id = str(chat_id)
+        self._metadata = dict(metadata or {})
+        # Status is an interim gateway send. Relay adapters use this marker to avoid
+        # sealing an open answer stream with the board's text.
+        self._metadata["_interim_send"] = True
         self._min_edit_interval, self._clock, self._sleep = min_edit_interval, clock, sleep
         self._lock = threading.Lock()  # observe() runs on the agent's worker thread
         self._children: dict[str, dict[str, Any]] = {}
@@ -92,6 +98,7 @@ class DelegatedChildStatus:
         self._revision = 0
         self._published_revision = 0
         self._publisher_running = False
+        self._delivery_abandoned = False
         self._message_id: Optional[str] = None
         self._last_edit_at: Optional[float] = None
         self._last_text: Optional[str] = None
@@ -139,7 +146,7 @@ class DelegatedChildStatus:
             if not changed:
                 return False
             self._revision += 1
-            if self._publisher_running:
+            if self._publisher_running or self._delivery_abandoned:
                 return False
             self._publisher_running = True
             return True
@@ -166,9 +173,28 @@ class DelegatedChildStatus:
                         revision, text = self._revision, self._render()
                 misses = 0
                 while True:
+                    editing = self._message_id is not None
                     result = await self._deliver(text)
                     if result is True:
                         break
+                    # A nominally successful initial send without an id is still unowned. It may
+                    # have posted, so retrying could create a duplicate bubble.
+                    if not editing and getattr(result, "success", False):
+                        with self._lock:
+                            self._delivery_abandoned = True
+                            self._publisher_running = False
+                        return
+                    # A send exception or an explicit permanent/ambiguous failure may have posted
+                    # without returning an id. Never risk a duplicate. Edits are idempotent, so an
+                    # exception while editing the owned message remains safe to retry.
+                    retryable = (editing and result is None) or bool(
+                        getattr(result, "retryable", False)
+                    )
+                    if not retryable:
+                        with self._lock:
+                            self._delivery_abandoned = True
+                            self._publisher_running = False
+                        return
                     misses += 1
                     if misses >= _MAX_MISSES:
                         break
@@ -189,6 +215,13 @@ class DelegatedChildStatus:
                         # bounded publisher instead of silently treating stale text as delivered.
                         self._publisher_running = False
                         return
+        except asyncio.CancelledError:
+            # Shutdown can cancel an in-flight initial send after Telegram accepted it but before
+            # its id came back. Abandon this board so a late child event cannot create a duplicate.
+            with self._lock:
+                self._delivery_abandoned = True
+                self._publisher_running = False
+            raise
         except Exception:
             logger.debug("delegated child status publisher failed", exc_info=True)
             with self._lock:
@@ -199,17 +232,22 @@ class DelegatedChildStatus:
         if text == self._last_text:
             return True  # an invisible change (e.g. inside the collapsed tail) owes no edit
         try:
-            if self._message_id is None:
+            initial_send = self._message_id is None
+            if initial_send:
                 result = await self._adapter.send(self._chat_id, text, metadata=self._metadata)
                 if getattr(result, "success", False) and getattr(result, "message_id", None):
                     self._message_id = str(result.message_id)
             else:
-                result = await self._adapter.edit_message(self._chat_id, self._message_id, text)
+                result = await self._adapter.edit_message(
+                    self._chat_id, self._message_id, text, metadata=self._metadata,
+                )
         except Exception:
             logger.debug("delegated child status delivery failed", exc_info=True)
             return None
         self._last_edit_at = self._clock()
         if getattr(result, "success", False):
+            if initial_send and self._message_id is None:
+                return result
             self._last_text = text
             return True
         return result
