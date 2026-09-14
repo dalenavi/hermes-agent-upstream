@@ -9,6 +9,7 @@ import pytest
 
 from gateway.config import Platform
 from gateway.delegated_child_status import DelegatedChildStatus
+from gateway.platforms.base import BasePlatformAdapter
 from gateway.display_config import resolve_display_setting
 from gateway.run_turn_runner import TurnRunner
 from gateway.session import SessionSource
@@ -30,8 +31,9 @@ class _EditingAdapter:
         self.sent.append((message_id, content))
         return SimpleNamespace(success=True, message_id=message_id)
 
-    async def edit_message(self, chat_id, message_id, content, *, finalize=False):
+    async def edit_message(self, chat_id, message_id, content, *, finalize=False, metadata=None):
         del chat_id, finalize
+        assert metadata in ({"_interim_send": True}, {"thread_id": "77", "_interim_send": True})
         if self.fail_edits:
             self.fail_edits -= 1
             return SimpleNamespace(success=False, message_id=None, retryable=True, retry_after=self.retry_after)
@@ -121,24 +123,28 @@ def _child(index: int, count: int = 1, **extra) -> dict:
 @pytest.mark.asyncio
 async def test_detached_child_lifecycle_edits_one_bubble_after_generation_advances(scheduled):
     """Late child events keep editing only their initiating turn's bubble, payload-free."""
+    from tools.delegate_tool_progress import _build_child_progress_callback
+
     adapter = _EditingAdapter()
     current = [True]
     turn = _turn(adapter)
     turn._ctx._run_still_current = lambda: current[0]
-
-    turn.progress_callback(
-        "subagent.start", preview="PRIVATE GOAL", args={"path": "/PRIVATE/path"}, goal="PRIVATE goal",
-        model="PRIVATE-model", child_session_id="PRIVATE-session", **_child(0),
+    parent = SimpleNamespace(
+        _delegate_spinner=None,
+        tool_progress_callback=turn.progress_callback,
+        session_id="PRIVATE-session",
     )
+    relay = _build_child_progress_callback(
+        0, "PRIVATE GOAL", parent, task_count=1, subagent_id="sa-real", depth=0,
+        model="PRIVATE-model", session_ref={"delegation_id": "deleg-real"},
+    )
+
+    relay("subagent.start")
     await _drain(scheduled)
     current[0] = False  # the detached child outlives its initiating foreground generation
-    turn.progress_callback(
-        "subagent.tool", "read_file", "/PRIVATE/path", {"path": "/PRIVATE/path"}, tool_count=1, **_child(0),
-    )
+    relay("tool.started", "read_file", "/PRIVATE/path", {"path": "/PRIVATE/path"})
     await _drain(scheduled)
-    turn.progress_callback(
-        "subagent.complete", preview="PRIVATE output", status="ok", summary="PRIVATE summary", **_child(0),
-    )
+    relay("subagent.complete", preview="PRIVATE output", status="ok", summary="PRIVATE summary")
     await _drain(scheduled)
 
     assert len(adapter.sent) == 1
@@ -185,9 +191,19 @@ def test_every_completion_status_is_terminal(status, phase):
 
 @pytest.mark.asyncio
 async def test_no_bubble_without_edit_support_off_telegram_or_when_disabled(scheduled):
-    send_only, discord, disabled = _SendOnlyAdapter(), _EditingAdapter(), _EditingAdapter()
+    class _InheritedBaseEdit(_SendOnlyAdapter):
+        edit_message = BasePlatformAdapter.edit_message
+
+    class _RelayWithoutEdit(_EditingAdapter):
+        def _descriptor_for_chat(self, _chat_id):
+            return SimpleNamespace(supports_edit=False)
+
+    send_only, inherited, relay_without_edit = _SendOnlyAdapter(), _InheritedBaseEdit(), _RelayWithoutEdit()
+    discord, disabled = _EditingAdapter(), _EditingAdapter()
     for turn in (
         _turn(send_only),
+        _turn(inherited),
+        _turn(relay_without_edit),
         _turn(discord, platform=Platform.DISCORD),
         _turn(disabled, delegation_status_enabled=False),
     ):
@@ -195,7 +211,7 @@ async def test_no_bubble_without_edit_support_off_telegram_or_when_disabled(sche
         turn.progress_callback("subagent.tool", "read_file", tool_count=1, **_child(0))
     await _drain(scheduled)
 
-    assert send_only.sent == []
+    assert send_only.sent == [] and inherited.sent == [] and relay_without_edit.sent == []
     assert discord.sent == [] and disabled.sent == []
 
 
@@ -256,7 +272,16 @@ async def test_concurrent_first_events_create_exactly_one_board_and_bubble(monke
         _run_still_current=lambda: True, _status_adapter=adapter, _status_chat_id="chat",
         _loop_for_step=loop,
     )
-    turn = TurnRunner(SimpleNamespace(), ctx)
+    loop_thread = threading.get_ident()
+    retained = []
+
+    def _retain(task):
+        assert threading.get_ident() == loop_thread
+        assert task is asyncio.current_task()
+        retained.append(task)
+
+    runner = SimpleNamespace(_running=True, _retain_background_task=_retain)
+    turn = TurnRunner(runner, ctx)
     barrier = threading.Barrier(8)
 
     def _start(index):
@@ -272,9 +297,25 @@ async def test_concurrent_first_events_create_exactly_one_board_and_bubble(monke
     await asyncio.gather(*(asyncio.wrap_future(future) for future in futures))
 
     assert boards_created == 1
+    assert len(retained) == len(futures) >= 1
     assert len(adapter.sent) == 1
     assert "0/8 done" in adapter.texts[-1]
     assert adapter.texts[-1].count("🚀 spawned") == 8
+
+    # Admission and retention stay on the gateway loop; once shutdown starts, a new board
+    # may observe state but must not publish it.
+    runner._running = False
+    shutdown_ctx = TurnContext(
+        source=SessionSource(platform=Platform.TELEGRAM, chat_id="chat"),
+        _run_still_current=lambda: True, _status_adapter=adapter, _status_chat_id="chat",
+        _loop_for_step=loop,
+    )
+    before = len(scheduled_futures)
+    TurnRunner(runner, shutdown_ctx).progress_callback("subagent.start", **_child(0))
+    with futures_lock:
+        shutdown_futures = list(scheduled_futures[before:])
+    await asyncio.gather(*(asyncio.wrap_future(future) for future in shutdown_futures))
+    assert len(adapter.sent) == 1
 
 
 @pytest.mark.asyncio
@@ -355,6 +396,66 @@ def test_overlapping_waves_use_delegation_ids_for_additive_totals():
         })
 
     assert board._render().split("\n", 1)[0] == "🔀 Subagents · 0/5 done"
+
+
+
+@pytest.mark.asyncio
+async def test_unowned_initial_delivery_is_never_retried():
+    class _UnownedSend:
+        def __init__(self, result):
+            self.result = result
+            self.attempts = 0
+            self.metadata = None
+
+        async def send(self, _chat_id, _content, *, metadata=None):
+            self.attempts += 1
+            self.metadata = metadata
+            return self.result
+
+    outcomes = (
+        SimpleNamespace(success=False, message_id=None, retryable=False),
+        SimpleNamespace(success=True, message_id=None, retryable=True),
+    )
+    for outcome in outcomes:
+        adapter = _UnownedSend(outcome)
+        metadata = {"thread_id": "77"}
+        board = DelegatedChildStatus(adapter, "chat", metadata, min_edit_interval=0.0)
+        metadata["thread_id"] = "changed"
+        assert board.observe("subagent.start", _child(0))
+        await board.run()
+
+        assert adapter.attempts == 1
+        assert adapter.metadata == {"thread_id": "77", "_interim_send": True}
+        assert board._delivery_abandoned is True
+        assert board.observe("subagent.complete", {**_child(0), "status": "ok"}) is False
+
+@pytest.mark.asyncio
+async def test_cancelling_an_in_flight_send_abandons_the_board():
+    class _BlockingSend(_EditingAdapter):
+        def __init__(self):
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.attempts = 0
+
+        async def send(self, chat_id, content, *, metadata=None):
+            del chat_id, content, metadata
+            self.attempts += 1
+            self.entered.set()
+            await asyncio.Future()
+
+    adapter = _BlockingSend()
+    board = DelegatedChildStatus(adapter, "chat", None, min_edit_interval=0.0)
+    assert board.observe("subagent.start", _child(0))
+    publisher = asyncio.create_task(board.run())
+    await adapter.entered.wait()
+    publisher.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await publisher
+
+    assert board._delivery_abandoned is True
+    assert board._publisher_running is False
+    assert board.observe("subagent.complete", {**_child(0), "status": "ok"}) is False
+    assert adapter.attempts == 1
 
 
 @pytest.mark.asyncio

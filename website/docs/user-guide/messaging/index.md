@@ -781,7 +781,7 @@ Telegram is usually a mobile inbox, so the defaults are tuned for that surface:
 - **`busy_ack_detail`** defaults to **`off`** — busy-state acknowledgments and long-running heartbeats stay terse (no `iteration 21/60` debug detail).
 - **`interim_assistant_messages`** stays **on** — real mid-turn assistant commentary (the model literally telling you what it's about to do) is signal, not noise.
 - **`long_running_notifications`** stays **on** — a single edit-in-place "⏳ Working — N min" bubble updates every few minutes so you have a heartbeat instead of staring at `typing…` for half an hour.
-- **`delegation_status`** stays **on** (Telegram) — when the agent delegates to subagents, one edit-in-place "🔀 Subagents · 1/3 done" bubble tracks each child's phase and tool count, including detached children that finish after the parent turn. It shows structure only — never a child's goal, arguments or output.
+- **`delegation_status`** stays **on** (Telegram) — when the agent delegates to subagents, one edit-in-place "🔀 Subagents · 1/3 done" bubble tracks each child's phase and tool count, including detached children that finish after the parent turn. It shows structure only — never a child's goal, arguments or output. This is best-effort, last-observed progress: a gateway restart or a child that exits without a completion event can leave the displayed phase stale.
 
 Opt out of any of the kept-on defaults or opt back into verbose progress per platform:
 
