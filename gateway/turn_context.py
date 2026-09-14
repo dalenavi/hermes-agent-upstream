@@ -79,6 +79,10 @@ class TurnContext:
     _status_adapter: Any = None
     _status_chat_id: Any = None
     _status_thread_metadata: Optional[dict] = None
+    # Live structural status for this turn's delegated children (Telegram); created on the first
+    # direct-child event so a late, detached child's edits stay inside the turn that spawned it.
+    _delegated_child_status: Any = None
+    delegation_status_enabled: bool = True  # display.delegation_status
     # bound TurnRunner callbacks read via ctx
     progress_callback: Optional[Callable] = None
     voice_ack_callback: Optional[Callable] = None

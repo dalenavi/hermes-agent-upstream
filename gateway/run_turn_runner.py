@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from agent.interrupt_compat import _accepts_keyword
 from agent.replay_cleanup import canonicalize_replay_history
 from gateway.config import Platform
+from gateway.delegated_child_status import DelegatedChildStatus
 from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.turn_context import TurnContext
@@ -33,6 +34,10 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
+
+# Direct-child start events arrive concurrently from worker threads. Serialise the lazy
+# compare-and-set so one TurnContext can never orphan multiple first-status bubbles.
+_delegated_board_lock = threading.Lock()
 
 
 def _renders_exec_approval_buttons(adapter_cls: type) -> bool:
@@ -107,6 +112,10 @@ class TurnRunner:
     def progress_callback(self, event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
         """Callback invoked by agent on tool lifecycle events."""
         ctx = self._ctx
+        # Delegated-child lifecycle → the turn's structural status bubble. Handled before every
+        # progress-queue gate (including _run_still_current): a detached child keeps reporting
+        # through this callback after the foreground turn that spawned it has finished.
+        self._progress_delegated_child_status(event_type, kwargs)
         # Failed subagent → one clean user-facing notice, handled FIRST, before every progress-queue
         # gate: platforms with tool_progress off must still hear about a dead delegation.
         if event_type == "subagent.complete":
@@ -158,6 +167,39 @@ class TurnRunner:
         msg = self._progress_build_message(tool_name, preview, args)
         if msg is not None:
             self._progress_emit(msg)
+
+    def _progress_delegated_child_status(self, event_type, kwargs: dict) -> None:
+        """Render direct ``subagent.*`` events into this turn's status bubble (Telegram only).
+
+        Only structural state crosses (ordinals, phases, tool counts) — never a goal, preview,
+        argument or error text — because a detached child outlives the turn that could vet them.
+        The bubble deliberately survives ordinary foreground progress cleanup for the same reason.
+        """
+        ctx = self._ctx
+        if not isinstance(event_type, str) or not event_type.startswith("subagent."):
+            return
+        if not ctx.delegation_status_enabled:
+            return
+        platform = getattr(ctx.source, "platform", None)
+        if getattr(platform, "value", platform) != Platform.TELEGRAM.value:
+            return
+        adapter = ctx._status_adapter
+        if adapter is None or not callable(getattr(adapter, "edit_message", None)):
+            return
+        try:
+            board = ctx._delegated_child_status
+            if board is None:
+                with _delegated_board_lock:
+                    board = ctx._delegated_child_status
+                    if board is None:
+                        board = ctx._delegated_child_status = DelegatedChildStatus(
+                            adapter, ctx._status_chat_id, ctx._status_thread_metadata,
+                        )
+            if board.observe(event_type, kwargs):
+                if self._schedule(board.run(), "delegated child status scheduling error") is None:
+                    board.publisher_not_started()
+        except Exception:
+            logger.debug("delegated child status failed", exc_info=True)
 
     def _progress_subagent_notice(self, preview, kwargs: dict) -> None:
         """Only terminal failure statuses render (same notice rail as credit warnings)."""
