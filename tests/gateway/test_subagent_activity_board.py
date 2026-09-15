@@ -607,8 +607,12 @@ async def test_change_hidden_in_the_collapsed_tail_sends_no_edit():
     ("seconds", "terminal", "expected"),
     [
         (0, False, "<30s"), (29.9, False, "<30s"),
-        (30, False, "<1m"), (59.9, False, "<1m"), (65, False, "~1m"),
-        (457, False, "~7m"), (4020, False, "~1h07m"), (93600, False, "~1d02h"),
+        (30, False, "<1m"), (44.9, False, "<1m"),
+        (45, False, "~1m"), (89.9, False, "~1m"), (90, False, "~2m"),
+        (449, False, "~7m"), (450, False, "~8m"),
+        (3569, False, "~59m"), (3570, False, "~1h00m"),
+        (4049, False, "~1h07m"), (4050, False, "~1h08m"),
+        (93599, False, "~1d02h"), (93600, False, "~1d02h"),
         (0, True, "0s"), (59.9, True, "59s"), (65, True, "1m05s"),
         (457, True, "7m37s"), (4020, True, "1h07m"), (93600, True, "1d02h"),
     ],
@@ -622,7 +626,7 @@ def test_heartbeat_advances_running_elapsed_and_completion_freezes_it():
     board = SubagentActivityBoard(None, "chat", None, clock=fake.clock)
     board.observe("subagent.start", _child(0))
     board.publisher_not_started()
-    fake.now += 457
+    fake.now += 449
     assert board.observe("subagent.heartbeat", _child(0))
     assert "🚀 spawned · ~7m" in board._render()
 

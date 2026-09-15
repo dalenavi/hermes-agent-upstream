@@ -91,22 +91,32 @@ def _format_elapsed(seconds: Any, *, terminal: bool = False) -> str:
         total = max(0, int(float(seconds)))
     except (TypeError, ValueError, OverflowError):
         total = 0
-    if terminal and total < 60:
-        return f"{total}s"
     minutes, secs = divmod(total, 60)
-    if terminal and minutes < 60:
-        return f"{minutes}m{secs:02d}s"
+    if terminal:
+        if total < 60:
+            return f"{total}s"
+        if minutes < 60:
+            return f"{minutes}m{secs:02d}s"
+        hours, minutes = divmod(minutes, 60)
+        if hours < 24:
+            return f"{hours}h{minutes:02d}m"
+        days, hours = divmod(hours, 24)
+        return f"{days}d{hours:02d}h"
+
     if total < 30:
         return "<30s"
-    if total < 60:
+    if total < 45:
         return "<1m"
-    if minutes < 60:
-        return f"~{minutes}m"
-    hours, minutes = divmod(minutes, 60)
+
+    rounded_minutes = (total + 30) // 60
+    if rounded_minutes < 60:
+        return f"~{rounded_minutes}m"
+    hours, minutes = divmod(rounded_minutes, 60)
     if hours < 24:
-        return f"{'~' if not terminal else ''}{hours}h{minutes:02d}m"
-    days, hours = divmod(hours, 24)
-    return f"{'~' if not terminal else ''}{days}d{hours:02d}h"
+        return f"~{hours}h{minutes:02d}m"
+    rounded_hours = (total + 1800) // 3600
+    days, hours = divmod(rounded_hours, 24)
+    return f"~{days}d{hours:02d}h"
 
 
 class SubagentActivityBoard:
