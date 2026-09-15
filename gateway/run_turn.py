@@ -2799,7 +2799,7 @@ class GatewayTurnMixin:
         # Independent of tool_progress: it renders structural state only, and detached children
         # may keep updating their spawning turn's board after the foreground turn has ended.
         subagent_activity_board_enabled = (
-            _display_surface_mode("subagent_activity_board", default=True) != "off"
+            _display_surface_mode("subagent_activity_board", default=False) != "off"
         )
         return self._RunAgentDisplay(
             user_config=user_config, platform_key=platform_key, enabled_toolsets=enabled_toolsets,

@@ -319,7 +319,8 @@ def observe_subagent_activity(
     descriptor_for_chat = getattr(adapter, "_descriptor_for_chat", None)
     if callable(descriptor_for_chat):
         try:
-            if not descriptor_for_chat(str(ctx._status_chat_id)).supports_edit:
+            descriptor = descriptor_for_chat(str(ctx._status_chat_id))
+            if not descriptor.supports_edit or not descriptor.supports_op("edit"):
                 return
         except Exception:
             return

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.config import Platform
+from gateway.relay.descriptor import CapabilityDescriptor
 from gateway.subagent_activity_board import SubagentActivityBoard
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.display_config import resolve_display_setting
@@ -198,12 +199,31 @@ async def test_no_bubble_without_edit_support_off_telegram_or_when_disabled(sche
         def _descriptor_for_chat(self, _chat_id):
             return SimpleNamespace(supports_edit=False)
 
-    send_only, inherited, relay_without_edit = _SendOnlyAdapter(), _InheritedBaseEdit(), _RelayWithoutEdit()
+    class _RelayWithoutEditOp(_EditingAdapter):
+        def _descriptor_for_chat(self, _chat_id):
+            return CapabilityDescriptor(
+                contract_version=1,
+                platform="telegram",
+                label="Telegram",
+                max_message_length=4096,
+                supports_draft_streaming=False,
+                supports_edit=True,
+                supports_threads=True,
+                markdown_dialect="telegram_html",
+                len_unit="chars",
+                supported_ops=("send", "typing"),
+            )
+
+    send_only = _SendOnlyAdapter()
+    inherited = _InheritedBaseEdit()
+    relay_without_edit = _RelayWithoutEdit()
+    relay_without_edit_op = _RelayWithoutEditOp()
     discord, disabled = _EditingAdapter(), _EditingAdapter()
     for turn in (
         _turn(send_only),
         _turn(inherited),
         _turn(relay_without_edit),
+        _turn(relay_without_edit_op),
         _turn(discord, platform=Platform.DISCORD),
         _turn(disabled, subagent_activity_board_enabled=False),
     ):
@@ -211,7 +231,8 @@ async def test_no_bubble_without_edit_support_off_telegram_or_when_disabled(sche
         turn.progress_callback("subagent.tool", "read_file", tool_count=1, **_child(0))
     await _drain(scheduled)
 
-    assert send_only.sent == [] and inherited.sent == [] and relay_without_edit.sent == []
+    assert send_only.sent == [] and inherited.sent == []
+    assert relay_without_edit.sent == [] and relay_without_edit_op.sent == []
     assert discord.sent == [] and disabled.sent == []
 
 
@@ -548,5 +569,6 @@ async def test_change_hidden_in_the_collapsed_tail_sends_no_edit():
 
 def test_display_setting_defaults_on_and_can_be_switched_off_per_platform():
     assert resolve_display_setting({}, "telegram", "subagent_activity_board") is True
+    assert resolve_display_setting({}, "discord", "subagent_activity_board") is False
     config = {"display": {"platforms": {"telegram": {"subagent_activity_board": "off"}}}}
     assert resolve_display_setting(config, "telegram", "subagent_activity_board") is False
