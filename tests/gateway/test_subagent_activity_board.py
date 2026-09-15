@@ -9,7 +9,7 @@ import pytest
 
 from gateway.config import Platform
 from gateway.relay.descriptor import CapabilityDescriptor
-from gateway.subagent_activity_board import SubagentActivityBoard
+from gateway.subagent_activity_board import SubagentActivityBoard, _format_elapsed
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.display_config import resolve_display_setting
 from gateway.run_turn_runner import TurnRunner
@@ -151,7 +151,7 @@ async def test_detached_child_lifecycle_edits_one_bubble_after_generation_advanc
     assert len(adapter.sent) == 1
     assert [message_id for message_id, _ in adapter.edits] == ["msg-1", "msg-1"]
     assert "0/1 done" in adapter.texts[0] and "🚀 spawned" in adapter.texts[0]
-    assert "⚙️ working · 1 tool" in adapter.texts[1]
+    assert "⚙️ working · 0s · 1 tool" in adapter.texts[1]
     assert "1/1 done" in adapter.texts[2] and "✅ done" in adapter.texts[2]
     assert "PRIVATE" not in " ".join(adapter.texts)
 
@@ -374,7 +374,7 @@ async def test_bursts_coalesce_to_one_edit_per_interval_and_finish_on_the_latest
     assert len(adapter.edits) <= 3
     assert all(seconds == 3.0 for seconds in fake.slept)
     assert "10/10 done" in adapter.texts[-1]
-    assert adapter.texts[-1].count("✅ done · 30 tools") == 8 and "…and 2 more" in adapter.texts[-1]
+    assert adapter.texts[-1].count("✅ done · 0s · 30 tools") == 8 and "…and 2 more" in adapter.texts[-1]
 
 
 @pytest.mark.asyncio
@@ -392,7 +392,7 @@ async def test_failed_edit_retries_the_latest_state_and_never_sends_a_second_mes
     assert len(adapter.sent) == 1
     assert [message_id for message_id, _ in adapter.edits] == ["msg-1"]
     assert 7.5 in fake.slept  # the server's retry_after is honoured before the retry
-    assert "working · 1 tool" in adapter.texts[-1]
+    assert "working · 0s · 1 tool" in adapter.texts[-1]
 
     # A short flood episode does not consume a terminal revision that has no later wake-up.
     adapter.fail_edits = 2
@@ -522,7 +522,7 @@ def test_sequential_waves_get_fresh_ordinals_and_additive_totals():
 
     assert lines[0] == "🔀 Subagents · 3/4 done"
     assert [line.split()[1] for line in lines[1:]] == ["#1", "#2", "#3", "#4"]
-    assert lines[4].endswith("#4 🚀 spawned")
+    assert lines[4].endswith("#4 🚀 spawned · 0s")
 
 
 def test_unchanged_state_and_invisible_changes_owe_no_edit():
@@ -565,6 +565,30 @@ async def test_change_hidden_in_the_collapsed_tail_sends_no_edit():
     await board.run()
 
     assert len(adapter.sent) == 1 and adapter.edits == []
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [(0, "0s"), (59.9, "59s"), (65, "1m05s"), (299, "4m59s"),
+     (300, "5m"), (457, "7m"), (4020, "1h07m"), (93600, "1d02h")],
+)
+def test_elapsed_precision_decreases_with_scale(seconds, expected):
+    assert _format_elapsed(seconds) == expected
+
+
+def test_heartbeat_advances_running_elapsed_and_completion_freezes_it():
+    fake = _FakeTime()
+    board = SubagentActivityBoard(None, "chat", None, clock=fake.clock)
+    board.observe("subagent.start", _child(0))
+    board.publisher_not_started()
+    fake.now += 457
+    assert board.observe("subagent.heartbeat", _child(0))
+    assert "🚀 spawned · 7m" in board._render()
+
+    board.observe("subagent.complete", {**_child(0), "status": "ok", "duration_seconds": 462})
+    fake.now += 3600
+    assert board.observe("subagent.heartbeat", _child(0)) is False
+    assert "✅ done · 7m" in board._render()
 
 
 def test_display_setting_defaults_on_and_can_be_switched_off_per_platform():

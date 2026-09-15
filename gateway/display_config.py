@@ -23,7 +23,7 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     "interim_assistant_messages": True,
     "long_running_notifications": True,
     # Per-turn subagent observability: one edit-in-place "🔀 Subagents · N/M done" board
-    # (Telegram); structural state only, never child goals, arguments, or output.
+    # (Telegram); elapsed/phase/tool-count state only, never child goals, arguments, or output.
     "subagent_activity_board": False,
     "busy_ack_detail": True,
     "busy_steer_ack_enabled": True,  # busy_input_mode=steer echo; the text still lands in the run

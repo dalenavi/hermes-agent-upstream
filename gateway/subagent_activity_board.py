@@ -11,7 +11,7 @@ so a messaging surface saw nothing until a delegation died.
 one ``send`` when the first child appears, then ``edit_message`` on that id
 only. Rules that keep it safe for children that outlive their turn:
 
-* Structural state only — ordinals, phases, tool counts. Never a goal, preview,
+* Structural state only — ordinals, phases, elapsed time, tool counts. Never a goal, preview,
   tool argument, model name or error text: a detached child keeps reporting
   after the foreground turn has moved on, so nothing it says is trusted.
 * Owned by exactly one ``TurnContext`` and bound to that turn's adapter, chat
@@ -57,7 +57,9 @@ _MARKS = {
     "stopped": "⛔",
 }
 _TERMINAL = frozenset({"done", "failed", "timeout", "stopped"})
-_EVENTS = frozenset({"subagent.start", "subagent.thinking", "subagent.tool", "subagent.complete"})
+_EVENTS = frozenset({
+    "subagent.start", "subagent.thinking", "subagent.tool", "subagent.heartbeat", "subagent.complete",
+})
 _MAX_ROWS = 8            # rendered rows; the tail collapses into one "…and N more" line
 _MAX_TOOLS = 9999
 _MIN_EDIT_INTERVAL = 3.0  # seconds between edits of one bubble (Telegram group budget is ~20/min)
@@ -81,6 +83,26 @@ def _as_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _format_elapsed(seconds: Any) -> str:
+    """Compact elapsed time with less precision as the duration grows."""
+    try:
+        total = max(0, int(float(seconds)))
+    except (TypeError, ValueError, OverflowError):
+        total = 0
+    if total < 60:
+        return f"{total}s"
+    minutes, secs = divmod(total, 60)
+    if minutes < 5:
+        return f"{minutes}m{secs:02d}s"
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h{minutes:02d}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d{hours:02d}h"
 
 
 class SubagentActivityBoard:
@@ -135,11 +157,20 @@ class SubagentActivityBoard:
                 self._expected_by_wave[wave_key] = max(
                     self._expected_by_wave.get(wave_key, 0), _as_int(payload.get("task_count"), 0),
                 )
-                child = self._children[key] = {"ordinal": len(self._children) + 1, "phase": "spawned", "tools": 0}
+                child = self._children[key] = {
+                    "ordinal": len(self._children) + 1,
+                    "phase": "spawned",
+                    "tools": 0,
+                    "started_at": self._clock(),
+                    "elapsed": 0.0,
+                }
                 changed = True
             else:
                 changed = False
             if child["phase"] not in _TERMINAL:
+                observed_elapsed = max(0.0, self._clock() - child["started_at"])
+                changed |= _format_elapsed(child["elapsed"]) != _format_elapsed(observed_elapsed)
+                child["elapsed"] = observed_elapsed
                 if event_type == "subagent.thinking":
                     changed |= child["phase"] != "thinking"
                     child["phase"] = "thinking"
@@ -149,7 +180,17 @@ class SubagentActivityBoard:
                     child["phase"], child["tools"] = "working", tools
                 elif event_type == "subagent.complete":
                     child["phase"] = _phase_for(payload.get("status"))
+                    duration = payload.get("duration_seconds")
+                    child["elapsed"] = (
+                        max(0.0, float(duration))
+                        if isinstance(duration, (int, float))
+                        else max(0.0, self._clock() - child["started_at"])
+                    )
                     changed = True
+                elif event_type == "subagent.heartbeat":
+                    # The delegation heartbeat already runs every 30s. It gives a quiet child enough
+                    # board revisions to keep elapsed time useful without adding another timer.
+                    pass
             if not changed:
                 return False
             self._revision += 1
@@ -268,7 +309,10 @@ class SubagentActivityBoard:
         shown = children[:_MAX_ROWS]
         for index, item in enumerate(shown):
             connector = "└" if overflow <= 0 and index == len(shown) - 1 else "├"
-            line = f"{connector} #{item['ordinal']} {_MARKS[item['phase']]} {item['phase']}"
+            line = (
+                f"{connector} #{item['ordinal']} {_MARKS[item['phase']]} {item['phase']}"
+                f" · {_format_elapsed(item['elapsed'])}"
+            )
             if item["tools"]:
                 line += f" · {item['tools']} {'tool' if item['tools'] == 1 else 'tools'}"
             lines.append(line)
