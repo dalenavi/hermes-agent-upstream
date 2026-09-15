@@ -23,22 +23,25 @@ class _EditingAdapter:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []           # (message_id, text)
         self.edits: list[tuple[str, str]] = []          # (message_id, text)
+        self.send_routes: list[tuple[str, dict, str]] = []
+        self.edit_routes: list[tuple[str, dict, str]] = []
         self.fail_edits = 0                             # next N edits fail (retryable)
         self.retry_after = None
 
     async def send(self, chat_id, content, *, metadata=None):
-        del chat_id, metadata
         message_id = f"msg-{len(self.sent) + 1}"
         self.sent.append((message_id, content))
+        self.send_routes.append((str(chat_id), dict(metadata or {}), message_id))
         return SimpleNamespace(success=True, message_id=message_id)
 
     async def edit_message(self, chat_id, message_id, content, *, finalize=False, metadata=None):
-        del chat_id, finalize
-        assert metadata in ({"_interim_send": True}, {"thread_id": "77", "_interim_send": True})
+        del finalize
+        assert metadata is not None and metadata.get("_interim_send") is True
         if self.fail_edits:
             self.fail_edits -= 1
             return SimpleNamespace(success=False, message_id=None, retryable=True, retry_after=self.retry_after)
         self.edits.append((message_id, content))
+        self.edit_routes.append((str(chat_id), dict(metadata), str(message_id)))
         return SimpleNamespace(success=True, message_id=message_id)
 
     @property
@@ -72,6 +75,21 @@ class _FakeTime:
         await asyncio.sleep(0)
 
 
+class _BlockingTime(_FakeTime):
+    """Manual clock whose first sleep can hold a publisher while events coalesce."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sleeping = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.sleeping.set()
+        await self.release.wait()
+        self.now += seconds
+
+
 @pytest.fixture
 def scheduled(monkeypatch):
     """Route TurnRunner._schedule onto the test loop and collect the tasks."""
@@ -96,13 +114,13 @@ async def _drain(tasks: list[asyncio.Task]) -> None:
         await asyncio.gather(*pending)
 
 
-def _turn(adapter, *, platform=Platform.TELEGRAM, runner=None, fake_time=None, **fields):
+def _turn(adapter, *, platform=Platform.TELEGRAM, runner=None, fake_time=None, thread_id="77", **fields):
     ctx = TurnContext(
         source=SessionSource(platform=platform, chat_id="chat"),
         _run_still_current=lambda: True,
         _status_adapter=adapter,
         _status_chat_id="chat",
-        _status_thread_metadata={"thread_id": "77"},
+        _status_thread_metadata={"thread_id": str(thread_id)},
         _loop_for_step=asyncio.get_running_loop(),
         **fields,
     )
@@ -127,8 +145,9 @@ async def test_detached_child_lifecycle_edits_one_bubble_after_generation_advanc
     from tools.delegate_tool_progress import _build_child_progress_callback
 
     adapter = _EditingAdapter()
+    fake = _FakeTime()
     current = [True]
-    turn = _turn(adapter)
+    turn = _turn(adapter, fake_time=fake)
     turn._ctx._run_still_current = lambda: current[0]
     parent = SimpleNamespace(
         _delegate_spinner=None,
@@ -342,7 +361,10 @@ async def test_concurrent_first_events_create_exactly_one_board_and_bubble(monke
 @pytest.mark.asyncio
 async def test_parent_turns_in_one_chat_edit_their_own_messages(scheduled):
     adapter = _EditingAdapter()
-    turns = [_turn(adapter, run_generation=generation) for generation in (1, 2)]
+    turns = [
+        _turn(adapter, run_generation=generation, thread_id=thread_id)
+        for generation, thread_id in ((1, "77"), (2, "88"))
+    ]
     for turn in turns:
         turn.progress_callback("subagent.start", **_child(0))
     await _drain(scheduled)
@@ -352,27 +374,40 @@ async def test_parent_turns_in_one_chat_edit_their_own_messages(scheduled):
 
     assert [message_id for message_id, _ in adapter.sent] == ["msg-1", "msg-2"]
     assert [message_id for message_id, _ in adapter.edits] == ["msg-2", "msg-1"]
+    assert adapter.send_routes == [
+        ("chat", {"thread_id": "77", "_interim_send": True}, "msg-1"),
+        ("chat", {"thread_id": "88", "_interim_send": True}, "msg-2"),
+    ]
+    assert adapter.edit_routes == [
+        ("chat", {"thread_id": "88", "_interim_send": True}, "msg-2"),
+        ("chat", {"thread_id": "77", "_interim_send": True}, "msg-1"),
+    ]
 
 
 @pytest.mark.asyncio
 async def test_bursts_coalesce_to_one_edit_per_interval_and_finish_on_the_latest_state(scheduled):
-    fake = _FakeTime()
+    fake = _BlockingTime()
     adapter = _EditingAdapter()
     turn = _turn(adapter, fake_time=fake)
 
-    for index in range(10):
+    turn.progress_callback("subagent.start", **_child(0, 10))
+    await _drain(scheduled)
+    turn.progress_callback("subagent.tool", "bash", tool_count=1, **_child(0, 10))
+    await fake.sleeping.wait()
+    for index in range(1, 10):
         turn.progress_callback("subagent.start", **_child(index, 10))
     for count in range(1, 31):
         for index in range(10):
             turn.progress_callback("subagent.tool", "bash", tool_count=count, **_child(index, 10))
     for index in range(10):
         turn.progress_callback("subagent.complete", status="ok", **_child(index, 10))
+    fake.release.set()
     await _drain(scheduled)
 
-    # 310 revisions -> one send plus a handful of paced edits, never one edit per event.
+    # Hundreds of revisions arriving during the edit floor collapse into one latest-state edit.
     assert len(adapter.sent) == 1
-    assert len(adapter.edits) <= 3
-    assert all(seconds == 3.0 for seconds in fake.slept)
+    assert len(adapter.edits) == 1
+    assert fake.slept == [3.0]
     assert "10/10 done" in adapter.texts[-1]
     assert adapter.texts[-1].count("✅ done · 0s · 30 tools") == 8 and "…and 2 more" in adapter.texts[-1]
 
@@ -394,7 +429,7 @@ async def test_failed_edit_retries_the_latest_state_and_never_sends_a_second_mes
     assert 7.5 in fake.slept  # the server's retry_after is honoured before the retry
     assert "working · 0s · 1 tool" in adapter.texts[-1]
 
-    # A short flood episode does not consume a terminal revision that has no later wake-up.
+    # Explicitly retryable failures do not consume a terminal revision that has no later wake-up.
     adapter.fail_edits = 2
     turn.progress_callback("subagent.tool", "bash", tool_count=2, **_child(0))
     turn.progress_callback("subagent.complete", status="ok", **_child(0))
@@ -526,7 +561,8 @@ def test_sequential_waves_get_fresh_ordinals_and_additive_totals():
 
 
 def test_unchanged_state_and_invisible_changes_owe_no_edit():
-    board = SubagentActivityBoard(None, "chat", None)
+    fake = _FakeTime()
+    board = SubagentActivityBoard(None, "chat", None, clock=fake.clock)
     assert board.observe("subagent.text", _child(0)) is False
     assert board.observe("tool.started", {}) is False
     assert board.observe("subagent.start", _child(0)) is True
@@ -585,10 +621,10 @@ def test_heartbeat_advances_running_elapsed_and_completion_freezes_it():
     assert board.observe("subagent.heartbeat", _child(0))
     assert "🚀 spawned · 7m" in board._render()
 
-    board.observe("subagent.complete", {**_child(0), "status": "ok", "duration_seconds": 462})
+    board.observe("subagent.complete", {**_child(0), "status": "ok", "duration_seconds": 125})
     fake.now += 3600
     assert board.observe("subagent.heartbeat", _child(0)) is False
-    assert "✅ done · 7m" in board._render()
+    assert "✅ done · 2m05s" in board._render()
 
 
 def test_display_setting_defaults_on_and_can_be_switched_off_per_platform():
