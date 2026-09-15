@@ -96,6 +96,8 @@ def _format_elapsed(seconds: Any, *, terminal: bool = False) -> str:
     minutes, secs = divmod(total, 60)
     if terminal and minutes < 60:
         return f"{minutes}m{secs:02d}s"
+    if total < 30:
+        return "<30s"
     if total < 60:
         return "<1m"
     if minutes < 60:
