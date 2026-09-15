@@ -1,4 +1,4 @@
-"""Live structural status for one parent turn's delegated children (Telegram).
+"""Live structural status for one parent turn's direct subagents (Telegram).
 
 ``_ChildProgressRelay`` (tools/delegate_tool_progress.py) already threads
 ``task_index``/``task_count``/``subagent_id``/``tool_count``/``depth`` into
@@ -7,7 +7,7 @@ gateway only ever rendered ``subagent.complete`` failures from that stream;
 every other child event fell through the ``tool.started``-only progress gate,
 so a messaging surface saw nothing until a delegation died.
 
-``DelegatedChildStatus`` turns that stream into one message per parent turn:
+``SubagentActivityBoard`` turns that stream into one message per parent turn:
 one ``send`` when the first child appears, then ``edit_message`` on that id
 only. Rules that keep it safe for children that outlive their turn:
 
@@ -31,9 +31,16 @@ import asyncio
 import logging
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+
+from gateway.config import Platform
+from gateway.platforms.base import BasePlatformAdapter
 
 logger = logging.getLogger(__name__)
+
+# First events can arrive concurrently from child worker threads. Serialize lazy
+# board creation so one parent turn cannot orphan multiple initial bubbles.
+_BOARD_LOCK = threading.Lock()
 
 _DONE = frozenset({"ok", "completed", "success"})
 _TIMEOUT = frozenset({"timeout"})
@@ -76,7 +83,7 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
-class DelegatedChildStatus:
+class SubagentActivityBoard:
     """Structural, privacy-safe status board owned by exactly one parent turn."""
 
     def __init__(
@@ -223,7 +230,7 @@ class DelegatedChildStatus:
                 self._publisher_running = False
             raise
         except Exception:
-            logger.debug("delegated child status publisher failed", exc_info=True)
+            logger.debug("subagent activity board publisher failed", exc_info=True)
             with self._lock:
                 self._publisher_running = False
 
@@ -242,7 +249,7 @@ class DelegatedChildStatus:
                     self._chat_id, self._message_id, text, metadata=self._metadata,
                 )
         except Exception:
-            logger.debug("delegated child status delivery failed", exc_info=True)
+            logger.debug("subagent activity board delivery failed", exc_info=True)
             return None
         self._last_edit_at = self._clock()
         if getattr(result, "success", False):
@@ -268,3 +275,66 @@ class DelegatedChildStatus:
         if overflow > 0:
             lines.append(f"└ …and {overflow} more")
         return "\n".join(lines)
+
+
+async def _publish_board(board: SubagentActivityBoard, runner: Any) -> None:
+    """Own one publisher task on the gateway loop, unless shutdown has begun."""
+    shutdown_event = getattr(runner, "_shutdown_event", None)
+    if getattr(runner, "_running", True) is False or (
+        shutdown_event is not None and shutdown_event.is_set()
+    ):
+        board.publisher_not_started()
+        return
+    retain = getattr(runner, "_retain_background_task", None)
+    if callable(retain):
+        retain(asyncio.current_task())
+    await board.run()
+
+
+def observe_subagent_activity(
+    ctx: Any,
+    runner: Any,
+    schedule: Callable[[Any, str], Any],
+    event_type: Any,
+    payload: dict[str, Any],
+) -> None:
+    """Project one direct-subagent event into its originating turn's Telegram board.
+
+    Called on agent worker threads before the foreground-generation gate so detached
+    subagents can finish updating the board after their parent response has returned.
+    """
+    if not isinstance(event_type, str) or not event_type.startswith("subagent."):
+        return
+    if not ctx.delegation_status_enabled:
+        return
+    platform = getattr(ctx.source, "platform", None)
+    if getattr(platform, "value", platform) != Platform.TELEGRAM.value:
+        return
+    adapter = ctx._status_adapter
+    adapter_edit = getattr(type(adapter), "edit_message", None) if adapter is not None else None
+    if adapter_edit is None or adapter_edit is BasePlatformAdapter.edit_message:
+        return
+    # RelayAdapter implements edit_message generically; its destination descriptor
+    # remains authoritative about whether this chat can actually edit.
+    descriptor_for_chat = getattr(adapter, "_descriptor_for_chat", None)
+    if callable(descriptor_for_chat):
+        try:
+            if not descriptor_for_chat(str(ctx._status_chat_id)).supports_edit:
+                return
+        except Exception:
+            return
+    try:
+        board = ctx._subagent_activity_board
+        if board is None:
+            with _BOARD_LOCK:
+                board = ctx._subagent_activity_board
+                if board is None:
+                    board = ctx._subagent_activity_board = SubagentActivityBoard(
+                        adapter, ctx._status_chat_id, ctx._status_thread_metadata,
+                    )
+        if board.observe(event_type, payload):
+            future = schedule(_publish_board(board, runner), "subagent activity board scheduling error")
+            if future is None:
+                board.publisher_not_started()
+    except Exception:
+        logger.debug("subagent activity board failed", exc_info=True)

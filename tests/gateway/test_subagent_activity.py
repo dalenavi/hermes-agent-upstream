@@ -1,4 +1,4 @@
-"""Delegated-child lifecycle status bubble on Telegram."""
+"""Subagent activity board on Telegram."""
 
 import asyncio
 import threading
@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.config import Platform
-from gateway.delegated_child_status import DelegatedChildStatus
+from gateway.subagent_activity import SubagentActivityBoard
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.display_config import resolve_display_setting
 from gateway.run_turn_runner import TurnRunner
@@ -106,11 +106,11 @@ def _turn(adapter, *, platform=Platform.TELEGRAM, runner=None, fake_time=None, *
         **fields,
     )
     if fake_time is not None:
-        ctx._delegated_child_status = DelegatedChildStatus(
+        ctx._subagent_activity_board = SubagentActivityBoard(
             adapter, "chat", ctx._status_thread_metadata, clock=fake_time.clock, sleep=fake_time.sleep,
         )
     else:  # no pacing: tests that only care about content
-        ctx._delegated_child_status = DelegatedChildStatus(
+        ctx._subagent_activity_board = SubagentActivityBoard(
             adapter, "chat", ctx._status_thread_metadata, min_edit_interval=0.0, sleep=asyncio.sleep,
         )
     return TurnRunner(runner if runner is not None else SimpleNamespace(), ctx)
@@ -181,7 +181,7 @@ async def test_failure_renders_structurally_and_the_notice_rail_is_untouched(sch
                                            ("brand-new-status", "❌ failed"), ("timeout", "⏱ timeout"),
                                            ("interrupted", "⛔ stopped")])
 def test_every_completion_status_is_terminal(status, phase):
-    board = DelegatedChildStatus(None, "chat", None)
+    board = SubagentActivityBoard(None, "chat", None)
     assert board.observe("subagent.complete", {**_child(0), "status": status})
     text = board._render()
     assert phase in text and "1/1 done" in text
@@ -225,15 +225,15 @@ async def test_board_is_created_lazily_and_only_for_eligible_turns(scheduled):
         source=SessionSource(platform=Platform.DISCORD, chat_id="chat"), _run_still_current=lambda: True,
         _status_adapter=_EditingAdapter(), _status_chat_id="chat", _loop_for_step=asyncio.get_running_loop(),
     )
-    assert telegram._delegated_child_status is None and discord._delegated_child_status is None
+    assert telegram._subagent_activity_board is None and discord._subagent_activity_board is None
     TurnRunner(SimpleNamespace(), telegram).progress_callback("tool.started", "read_file")
-    assert telegram._delegated_child_status is None
+    assert telegram._subagent_activity_board is None
     TurnRunner(SimpleNamespace(), telegram).progress_callback("subagent.start", **_child(0))
     TurnRunner(SimpleNamespace(), discord).progress_callback("subagent.start", **_child(0))
     await _drain(scheduled)
 
-    assert isinstance(telegram._delegated_child_status, DelegatedChildStatus)
-    assert discord._delegated_child_status is None
+    assert isinstance(telegram._subagent_activity_board, SubagentActivityBoard)
+    assert discord._subagent_activity_board is None
     assert len(telegram._status_adapter.sent) == 1 and discord._status_adapter.sent == []
 
 
@@ -241,14 +241,14 @@ async def test_board_is_created_lazily_and_only_for_eligible_turns(scheduled):
 async def test_concurrent_first_events_create_exactly_one_board_and_bubble(monkeypatch):
     """A cold first wave arrives from N workers; lazy creation must be one compare-and-set."""
     from gateway import run as run_mod
-    from gateway import run_turn_runner as runner_mod
+    from gateway import subagent_activity as activity_mod
 
     loop = asyncio.get_running_loop()
     scheduled_futures = []
     futures_lock = threading.Lock()
     boards_created = 0
     boards_lock = threading.Lock()
-    real_board = DelegatedChildStatus
+    real_board = SubagentActivityBoard
 
     class _SlowBoard(real_board):
         def __init__(self, *args, **kwargs):
@@ -264,7 +264,7 @@ async def test_concurrent_first_events_create_exactly_one_board_and_bubble(monke
             scheduled_futures.append(future)
         return future
 
-    monkeypatch.setattr(runner_mod, "DelegatedChildStatus", _SlowBoard)
+    monkeypatch.setattr(activity_mod, "SubagentActivityBoard", _SlowBoard)
     monkeypatch.setattr(run_mod, "safe_schedule_threadsafe", _schedule)
     adapter = _EditingAdapter()
     ctx = TurnContext(
@@ -382,7 +382,7 @@ async def test_failed_edit_retries_the_latest_state_and_never_sends_a_second_mes
 
 
 def test_overlapping_waves_use_delegation_ids_for_additive_totals():
-    board = DelegatedChildStatus(None, "chat", None)
+    board = SubagentActivityBoard(None, "chat", None)
     events = [
         (0, 3, "wave-a", "a0"),
         (0, 2, "wave-b", "b0"),
@@ -419,7 +419,7 @@ async def test_unowned_initial_delivery_is_never_retried():
     for outcome in outcomes:
         adapter = _UnownedSend(outcome)
         metadata = {"thread_id": "77"}
-        board = DelegatedChildStatus(adapter, "chat", metadata, min_edit_interval=0.0)
+        board = SubagentActivityBoard(adapter, "chat", metadata, min_edit_interval=0.0)
         metadata["thread_id"] = "changed"
         assert board.observe("subagent.start", _child(0))
         await board.run()
@@ -444,7 +444,7 @@ async def test_cancelling_an_in_flight_send_abandons_the_board():
             await asyncio.Future()
 
     adapter = _BlockingSend()
-    board = DelegatedChildStatus(adapter, "chat", None, min_edit_interval=0.0)
+    board = SubagentActivityBoard(adapter, "chat", None, min_edit_interval=0.0)
     assert board.observe("subagent.start", _child(0))
     publisher = asyncio.create_task(board.run())
     await adapter.entered.wait()
@@ -478,7 +478,7 @@ async def test_first_send_failure_is_retried_without_leaving_a_ghost_id(schedule
 
 
 def test_nested_grandchildren_are_ignored():
-    board = DelegatedChildStatus(None, "chat", None)
+    board = SubagentActivityBoard(None, "chat", None)
     assert board.observe("subagent.start", _child(0, 2))
     # A child orchestrator relays its own children's events upward with depth >= 1.
     assert board.observe("subagent.start", {**_child(0, 3), "depth": 1}) is False
@@ -488,7 +488,7 @@ def test_nested_grandchildren_are_ignored():
 
 
 def test_sequential_waves_get_fresh_ordinals_and_additive_totals():
-    board = DelegatedChildStatus(None, "chat", None)
+    board = SubagentActivityBoard(None, "chat", None)
     board.observe("subagent.start", {**_child(1, 3), "subagent_id": "w1-1"})  # out of order within a wave
     board.observe("subagent.start", {**_child(0, 3), "subagent_id": "w1-0"})
     board.observe("subagent.start", {**_child(2, 3), "subagent_id": "w1-2"})
@@ -505,7 +505,7 @@ def test_sequential_waves_get_fresh_ordinals_and_additive_totals():
 
 
 def test_unchanged_state_and_invisible_changes_owe_no_edit():
-    board = DelegatedChildStatus(None, "chat", None)
+    board = SubagentActivityBoard(None, "chat", None)
     assert board.observe("subagent.text", _child(0)) is False
     assert board.observe("tool.started", {}) is False
     assert board.observe("subagent.start", _child(0)) is True
@@ -521,7 +521,7 @@ def test_unchanged_state_and_invisible_changes_owe_no_edit():
 
 
 def test_wide_fan_out_collapses_its_tail_into_one_closing_row():
-    board = DelegatedChildStatus(None, "chat", None)
+    board = SubagentActivityBoard(None, "chat", None)
     for index in range(12):
         board.observe("subagent.start", _child(index, 12))
     lines = board._render().split("\n")
@@ -536,7 +536,7 @@ def test_wide_fan_out_collapses_its_tail_into_one_closing_row():
 async def test_change_hidden_in_the_collapsed_tail_sends_no_edit():
     fake = _FakeTime()
     adapter = _EditingAdapter()
-    board = DelegatedChildStatus(adapter, "chat", None, clock=fake.clock, sleep=fake.sleep)
+    board = SubagentActivityBoard(adapter, "chat", None, clock=fake.clock, sleep=fake.sleep)
     for index in range(9):
         board.observe("subagent.start", _child(index, 9))
     await board.run()

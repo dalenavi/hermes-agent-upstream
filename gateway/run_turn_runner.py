@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from agent.interrupt_compat import _accepts_keyword
 from agent.replay_cleanup import canonicalize_replay_history
 from gateway.config import Platform
-from gateway.delegated_child_status import DelegatedChildStatus
+from gateway.subagent_activity import observe_subagent_activity
 from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.turn_context import TurnContext
@@ -42,11 +42,6 @@ _CARD_DESTINATION_REFUSALS = {
     "slack task_card requires a thread anchor",
     "slack task_card requires a thread anchor (Slack streams are thread replies)",
 }
-
-# Direct-child start events arrive concurrently from worker threads. Serialise the lazy
-# compare-and-set so one TurnContext can never orphan multiple first-status bubbles.
-_delegated_board_lock = threading.Lock()
-
 
 def _renders_exec_approval_buttons(adapter_cls: type) -> bool:
     """True when the adapter class renders native approval buttons. BasePlatformAdapter subclasses
@@ -120,10 +115,10 @@ class TurnRunner:
     def progress_callback(self, event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
         """Callback invoked by agent on tool lifecycle events."""
         ctx = self._ctx
-        # Delegated-child lifecycle → the turn's structural status bubble. Handled before every
+        # Subagent lifecycle → the turn's structural status bubble. Handled before every
         # progress-queue gate (including _run_still_current): a detached child keeps reporting
         # through this callback after the foreground turn that spawned it has finished.
-        self._progress_delegated_child_status(event_type, kwargs)
+        observe_subagent_activity(ctx, self._runner, self._schedule, event_type, kwargs)
         # Failed subagent → one clean user-facing notice, handled FIRST, before every progress-queue
         # gate: platforms with tool_progress off must still hear about a dead delegation.
         if event_type == "subagent.complete":
@@ -175,67 +170,6 @@ class TurnRunner:
         msg = self._progress_build_message(tool_name, preview, args)
         if msg is not None:
             self._progress_emit(msg)
-
-    async def _run_delegated_child_status(self, board: DelegatedChildStatus) -> None:
-        """Own a board publisher on the gateway loop, unless shutdown has begun."""
-        runner = self._runner
-        shutdown_event = getattr(runner, "_shutdown_event", None)
-        if getattr(runner, "_running", True) is False or (
-            shutdown_event is not None and shutdown_event.is_set()
-        ):
-            board.publisher_not_started()
-            return
-        retain = getattr(runner, "_retain_background_task", None)
-        if callable(retain):
-            retain(asyncio.current_task())
-        await board.run()
-
-    def _progress_delegated_child_status(self, event_type, kwargs: dict) -> None:
-        """Render direct ``subagent.*`` events into this turn's status bubble (Telegram only).
-
-        Only structural state crosses (ordinals, phases, tool counts) — never a goal, preview,
-        argument or error text — because a detached child outlives the turn that could vet them.
-        The bubble deliberately survives ordinary foreground progress cleanup for the same reason.
-        """
-        ctx = self._ctx
-        if not isinstance(event_type, str) or not event_type.startswith("subagent."):
-            return
-        if not ctx.delegation_status_enabled:
-            return
-        platform = getattr(ctx.source, "platform", None)
-        if getattr(platform, "value", platform) != Platform.TELEGRAM.value:
-            return
-        adapter = ctx._status_adapter
-        adapter_edit = getattr(type(adapter), "edit_message", None) if adapter is not None else None
-        if adapter_edit is None or adapter_edit is BasePlatformAdapter.edit_message:
-            return
-        # RelayAdapter implements edit_message generically; the destination descriptor
-        # remains authoritative about whether this chat can actually edit.
-        descriptor_for_chat = getattr(adapter, "_descriptor_for_chat", None)
-        if callable(descriptor_for_chat):
-            try:
-                if not descriptor_for_chat(str(ctx._status_chat_id)).supports_edit:
-                    return
-            except Exception:
-                return
-        try:
-            board = ctx._delegated_child_status
-            if board is None:
-                with _delegated_board_lock:
-                    board = ctx._delegated_child_status
-                    if board is None:
-                        board = ctx._delegated_child_status = DelegatedChildStatus(
-                            adapter, ctx._status_chat_id, ctx._status_thread_metadata,
-                        )
-            if board.observe(event_type, kwargs):
-                future = self._schedule(
-                    self._run_delegated_child_status(board),
-                    "delegated child status scheduling error",
-                )
-                if future is None:
-                    board.publisher_not_started()
-        except Exception:
-            logger.debug("delegated child status failed", exc_info=True)
 
     def _progress_subagent_notice(self, preview, kwargs: dict) -> None:
         """Only terminal failure statuses render (same notice rail as credit warnings)."""
