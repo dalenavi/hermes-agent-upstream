@@ -43,6 +43,7 @@ _CARD_DESTINATION_REFUSALS = {
     "slack task_card requires a thread anchor (Slack streams are thread replies)",
 }
 
+
 def _renders_exec_approval_buttons(adapter_cls: type) -> bool:
     """True when the adapter class renders native approval buttons. BasePlatformAdapter subclasses
     say so through ``supports_exec_approval_buttons``; anything else (test doubles, relay-style

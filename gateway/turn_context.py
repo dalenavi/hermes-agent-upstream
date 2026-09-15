@@ -8,7 +8,10 @@ single-element lists so mutation stays visible to the outer body.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, Optional
+
+if TYPE_CHECKING:
+    from gateway.subagent_activity import SubagentActivityBoard
 
 
 @dataclass
@@ -81,8 +84,8 @@ class TurnContext:
     _status_thread_metadata: Optional[dict] = None
     # Live structural status for this turn's direct subagents (Telegram); created on the first
     # direct-child event so a late, detached child's edits stay inside the turn that spawned it.
-    _subagent_activity_board: Any = None
-    delegation_status_enabled: bool = True  # display.delegation_status
+    _subagent_activity_board: Optional[SubagentActivityBoard] = None
+    subagent_activity_enabled: bool = True  # display.subagent_activity
     # bound TurnRunner callbacks read via ctx
     progress_callback: Optional[Callable] = None
     voice_ack_callback: Optional[Callable] = None

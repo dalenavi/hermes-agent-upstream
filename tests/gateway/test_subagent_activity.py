@@ -205,7 +205,7 @@ async def test_no_bubble_without_edit_support_off_telegram_or_when_disabled(sche
         _turn(inherited),
         _turn(relay_without_edit),
         _turn(discord, platform=Platform.DISCORD),
-        _turn(disabled, delegation_status_enabled=False),
+        _turn(disabled, subagent_activity_enabled=False),
     ):
         turn.progress_callback("subagent.start", **_child(0))
         turn.progress_callback("subagent.tool", "read_file", tool_count=1, **_child(0))
@@ -547,6 +547,6 @@ async def test_change_hidden_in_the_collapsed_tail_sends_no_edit():
 
 
 def test_display_setting_defaults_on_and_can_be_switched_off_per_platform():
-    assert resolve_display_setting({}, "telegram", "delegation_status") is True
-    config = {"display": {"platforms": {"telegram": {"delegation_status": "off"}}}}
-    assert resolve_display_setting(config, "telegram", "delegation_status") is False
+    assert resolve_display_setting({}, "telegram", "subagent_activity") is True
+    config = {"display": {"platforms": {"telegram": {"subagent_activity": "off"}}}}
+    assert resolve_display_setting(config, "telegram", "subagent_activity") is False

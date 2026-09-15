@@ -305,7 +305,7 @@ def observe_subagent_activity(
     """
     if not isinstance(event_type, str) or not event_type.startswith("subagent."):
         return
-    if not ctx.delegation_status_enabled:
+    if not ctx.subagent_activity_enabled:
         return
     platform = getattr(ctx.source, "platform", None)
     if getattr(platform, "value", platform) != Platform.TELEGRAM.value:
