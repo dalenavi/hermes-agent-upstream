@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.config import Platform
-from gateway.subagent_activity import SubagentActivityBoard
+from gateway.subagent_activity_board import SubagentActivityBoard
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.display_config import resolve_display_setting
 from gateway.run_turn_runner import TurnRunner
@@ -205,7 +205,7 @@ async def test_no_bubble_without_edit_support_off_telegram_or_when_disabled(sche
         _turn(inherited),
         _turn(relay_without_edit),
         _turn(discord, platform=Platform.DISCORD),
-        _turn(disabled, subagent_activity_enabled=False),
+        _turn(disabled, subagent_activity_board_enabled=False),
     ):
         turn.progress_callback("subagent.start", **_child(0))
         turn.progress_callback("subagent.tool", "read_file", tool_count=1, **_child(0))
@@ -241,7 +241,7 @@ async def test_board_is_created_lazily_and_only_for_eligible_turns(scheduled):
 async def test_concurrent_first_events_create_exactly_one_board_and_bubble(monkeypatch):
     """A cold first wave arrives from N workers; lazy creation must be one compare-and-set."""
     from gateway import run as run_mod
-    from gateway import subagent_activity as activity_mod
+    from gateway import subagent_activity_board as activity_mod
 
     loop = asyncio.get_running_loop()
     scheduled_futures = []
@@ -547,6 +547,6 @@ async def test_change_hidden_in_the_collapsed_tail_sends_no_edit():
 
 
 def test_display_setting_defaults_on_and_can_be_switched_off_per_platform():
-    assert resolve_display_setting({}, "telegram", "subagent_activity") is True
-    config = {"display": {"platforms": {"telegram": {"subagent_activity": "off"}}}}
-    assert resolve_display_setting(config, "telegram", "subagent_activity") is False
+    assert resolve_display_setting({}, "telegram", "subagent_activity_board") is True
+    config = {"display": {"platforms": {"telegram": {"subagent_activity_board": "off"}}}}
+    assert resolve_display_setting(config, "telegram", "subagent_activity_board") is False

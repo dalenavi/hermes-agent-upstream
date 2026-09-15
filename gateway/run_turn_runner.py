@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from agent.interrupt_compat import _accepts_keyword
 from agent.replay_cleanup import canonicalize_replay_history
 from gateway.config import Platform
-from gateway.subagent_activity import observe_subagent_activity
+from gateway.subagent_activity_board import observe_subagent_activity
 from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.turn_context import TurnContext

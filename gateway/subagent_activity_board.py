@@ -1,4 +1,4 @@
-"""Live structural status for one parent turn's direct subagents (Telegram).
+"""Per-turn observability board for live structural subagent status (Telegram).
 
 ``_ChildProgressRelay`` (tools/delegate_tool_progress.py) already threads
 ``task_index``/``task_count``/``subagent_id``/``tool_count``/``depth`` into
@@ -305,7 +305,7 @@ def observe_subagent_activity(
     """
     if not isinstance(event_type, str) or not event_type.startswith("subagent."):
         return
-    if not ctx.subagent_activity_enabled:
+    if not ctx.subagent_activity_board_enabled:
         return
     platform = getattr(ctx.source, "platform", None)
     if getattr(platform, "value", platform) != Platform.TELEGRAM.value:

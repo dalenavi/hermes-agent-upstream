@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, List, Optional
 
 if TYPE_CHECKING:
-    from gateway.subagent_activity import SubagentActivityBoard
+    from gateway.subagent_activity_board import SubagentActivityBoard
 
 
 @dataclass
@@ -85,7 +85,7 @@ class TurnContext:
     # Live structural status for this turn's direct subagents (Telegram); created on the first
     # direct-child event so a late, detached child's edits stay inside the turn that spawned it.
     _subagent_activity_board: Optional[SubagentActivityBoard] = None
-    subagent_activity_enabled: bool = True  # display.subagent_activity
+    subagent_activity_board_enabled: bool = True  # display.subagent_activity_board
     # bound TurnRunner callbacks read via ctx
     progress_callback: Optional[Callable] = None
     voice_ack_callback: Optional[Callable] = None
