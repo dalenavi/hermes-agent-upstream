@@ -85,24 +85,26 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
-def _format_elapsed(seconds: Any) -> str:
-    """Compact elapsed time with less precision as the duration grows."""
+def _format_elapsed(seconds: Any, *, terminal: bool = False) -> str:
+    """Show sampled running age approximately and authoritative completion precisely."""
     try:
         total = max(0, int(float(seconds)))
     except (TypeError, ValueError, OverflowError):
         total = 0
-    if total < 60:
+    if terminal and total < 60:
         return f"{total}s"
     minutes, secs = divmod(total, 60)
-    if minutes < 5:
+    if terminal and minutes < 60:
         return f"{minutes}m{secs:02d}s"
+    if total < 60:
+        return "<1m"
     if minutes < 60:
-        return f"{minutes}m"
+        return f"~{minutes}m"
     hours, minutes = divmod(minutes, 60)
     if hours < 24:
-        return f"{hours}h{minutes:02d}m"
+        return f"{'~' if not terminal else ''}{hours}h{minutes:02d}m"
     days, hours = divmod(hours, 24)
-    return f"{days}d{hours:02d}h"
+    return f"{'~' if not terminal else ''}{days}d{hours:02d}h"
 
 
 class SubagentActivityBoard:
@@ -311,7 +313,7 @@ class SubagentActivityBoard:
             connector = "└" if overflow <= 0 and index == len(shown) - 1 else "├"
             line = (
                 f"{connector} #{item['ordinal']} {_MARKS[item['phase']]} {item['phase']}"
-                f" · {_format_elapsed(item['elapsed'])}"
+                f" · {_format_elapsed(item['elapsed'], terminal=item['phase'] in _TERMINAL)}"
             )
             if item["tools"]:
                 line += f" · {item['tools']} {'tool' if item['tools'] == 1 else 'tools'}"
